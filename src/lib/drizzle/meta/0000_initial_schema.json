@@ -1,0 +1,138 @@
+{
+  "version": "5",
+  "dialect": "postgresql",
+  "id": "0000_initial_schema",
+  "prevId": null,
+  "tables": {
+    "Chat": {
+      "name": "Chat",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "messages": {
+          "name": "messages",
+          "type": "json",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "external_user_id": {
+          "name": "external_user_id",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_email": {
+          "name": "user_email",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "Chat_external_user_id_idx": {
+          "name": "Chat_external_user_id_idx",
+          "columns": ["external_user_id"]
+        },
+        "Chat_createdAt_idx": {
+          "name": "Chat_createdAt_idx",
+          "columns": ["createdAt"]
+        }
+      }
+    },
+    "CodeSubmissions": {
+      "name": "CodeSubmissions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "external_user_id": {
+          "name": "external_user_id",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "question_slug": {
+          "name": "question_slug",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "language": {
+          "name": "language",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'python'"
+        },
+        "problem_title": {
+          "name": "problem_title",
+          "type": "varchar(500)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "submission_status": {
+          "name": "submission_status",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'accepted'"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "CodeSubmissions_external_user_id_idx": {
+          "name": "CodeSubmissions_external_user_id_idx",
+          "columns": ["external_user_id"]
+        },
+        "CodeSubmissions_question_slug_idx": {
+          "name": "CodeSubmissions_question_slug_idx",
+          "columns": ["question_slug"]
+        },
+        "CodeSubmissions_created_at_idx": {
+          "name": "CodeSubmissions_created_at_idx",
+          "columns": ["created_at"]
+        },
+        "CodeSubmissions_user_question_idx": {
+          "name": "CodeSubmissions_user_question_idx",
+          "columns": ["external_user_id", "question_slug"]
+        }
+      }
+    }
+  }
+}
