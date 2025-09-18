@@ -1,69 +1,177 @@
-import { z } from 'zod';
-import { normalizeTags } from '../utils/tag-normalizer';
+import { and, desc, eq, inArray } from 'drizzle-orm';
+import { externalDb } from '@/lib/algo-db';
+import {
+  User,
+  questions,
+  QuestionTag,
+  _QuestionToQuestionTag,
+  Bookmark,
+  Submission,
+  UserConfig,
+  LeetCodeStats,
+  difficultyEnum
+} from '@/models/algo-schema';
+import { normalizeTags, convertToScreamingSnakeCase } from '@/utils/tag-normalizer';
 
-// Mock data for now - in a real implementation, these would connect to your database
+type Difficulty = 'BEGINNER' | 'EASY' | 'MEDIUM' | 'HARD' | 'VERYHARD';
+
+function slugToTitle(slug?: string | null): string | undefined {
+  if (!slug) return undefined;
+  return slug
+    .split('-')
+    .map((s) => (s ? s[0].toUpperCase() + s.slice(1) : s))
+    .join(' ');
+}
+
+function dateKey(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  return `${y}-${m}-${day}`;
+}
+
 export const getUserProgress = async (userId: string, options: { timeRange: string }) => {
-  // Mock implementation - replace with actual database queries
+  // Fetch basic user
+  const [user] = await externalDb.select().from(User).where(eq(User.id, userId));
+
+  // Fetch config + stats (optional)
+  const [config] = await externalDb
+    .select()
+    .from(UserConfig)
+    .where(eq(UserConfig.userEmail, user?.email ?? ''));
+
+  const [lcStats] = await externalDb
+    .select()
+    .from(LeetCodeStats)
+    .where(eq(LeetCodeStats.leetcodeUsername, user?.leetcodeUsername ?? ''));
+
+  // Time window filter (optional simple filtering on createdAt)
+  const now = new Date();
+  let since: Date | undefined;
+  if (options.timeRange === 'week') {
+    since = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  } else if (options.timeRange === 'month') {
+    since = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  }
+
+  // Get user's submissions in range
+  const submissions = await externalDb
+    .select()
+    .from(Submission)
+    .where(
+      since
+        ? and(eq(Submission.userId, userId), (Submission.createdAt as any).gte(since))
+        : eq(Submission.userId, userId)
+    )
+    .orderBy(desc(Submission.createdAt));
+
+  const qIds = Array.from(new Set(submissions.map((s) => s.questionId)));
+  const qMap = new Map<string, (typeof questions)['$inferSelect']>();
+  if (qIds.length) {
+    const qs = await externalDb.select().from(questions).where(inArray(questions.id, qIds));
+    qs.forEach((q) => qMap.set(q.id, q));
+  }
+
+  // Difficulty aggregates
+  const difficulties: Difficulty[] = ['BEGINNER', 'EASY', 'MEDIUM', 'HARD', 'VERYHARD'];
+  const byDifficulty = new Map<Difficulty, { solved: number; attempted: number }>();
+  difficulties.forEach((d) => byDifficulty.set(d, { solved: 0, attempted: 0 }));
+
+  const attemptedByQuestion = new Map<string, boolean>();
+  const solvedByQuestion = new Map<string, boolean>();
+
+  for (const s of submissions) {
+    attemptedByQuestion.set(s.questionId, true);
+    if (s.status === 'ACCEPTED') {
+      solvedByQuestion.set(s.questionId, true);
+    }
+  }
+
+  for (const qId of attemptedByQuestion.keys()) {
+    const q = qMap.get(qId);
+    if (!q) continue;
+    const bucket = byDifficulty.get(q.difficulty as Difficulty);
+    if (!bucket) continue;
+    bucket.attempted += 1;
+    if (solvedByQuestion.get(qId)) bucket.solved += 1;
+  }
+
+  const totalSolved = Array.from(solvedByQuestion.values()).filter(Boolean).length;
+
+  // Streak (days with at least one ACCEPTED)
+  const acceptedDates = new Set<string>();
+  submissions.forEach((s) => {
+    if (s.status === 'ACCEPTED' && s.createdAt) acceptedDates.add(dateKey(new Date(s.createdAt)));
+  });
+  let streak = 0;
+  const today = new Date();
+  for (let i = 0; i < 365; i++) {
+    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+    d.setUTCDate(d.getUTCDate() - i);
+    if (acceptedDates.has(dateKey(d))) streak += 1; else break;
+  }
+
   return {
     user: {
-      username: "Test User",
-      leetcodeUsername: "test_user",
-      enrollmentNum: "1234567890",
-      section: "A",
-      individualPoints: 80,
-      leetcodeQuestionsSolved: 25,
-      codeforcesQuestionsSolved: 0,
-      rank: "novice_1",
-      userBrief: "Just started focusing on DSA to build problem-solving skills for placements."
+      username: user?.username ?? '',
+      leetcodeUsername: user?.leetcodeUsername ?? '',
+      enrollmentNum: user?.enrollmentNum ?? '',
+      section: user?.section ?? '',
+      individualPoints: user?.individualPoints ?? 0,
+      leetcodeQuestionsSolved: lcStats?.totalSolved ?? config?.leetcode_questions_solved ?? totalSolved,
+      codeforcesQuestionsSolved: config?.codeforces_questions_solved ?? 0,
+      rank: (config?.rank as string) ?? 'novice_1',
+      userBrief:
+        config?.user_brief ??
+        'Just started focusing on DSA to build problem-solving skills for placements.'
     },
     overview: {
-      totalSolved: 18,
-      difficultyBreakdown: [
-        { difficulty: "BEGINNER", solved: 8, attempted: 8, successRate: 100 },
-        { difficulty: "EASY", solved: 7, attempted: 7, successRate: 100 },
-        { difficulty: "MEDIUM", solved: 3, attempted: 3, successRate: 100 }
-      ],
-      currentStreak: 5,
+      totalSolved,
+      difficultyBreakdown: difficulties.map((d) => {
+        const bucket = byDifficulty.get(d)!;
+        const successRate = bucket.attempted ? Math.round((bucket.solved / bucket.attempted) * 100) : 0;
+        return { difficulty: d, solved: bucket.solved, attempted: bucket.attempted, successRate };
+      }),
+      currentStreak: streak,
       timeRange: options.timeRange
     },
-    tagProgress: [
-      { tagName: "Array", totalProblems: 15, solvedProblems: 12, easyCount: 8, mediumCount: 3, hardCount: 1 },
-      { tagName: "String", totalProblems: 12, solvedProblems: 8, easyCount: 6, mediumCount: 2, hardCount: 0 },
-      { tagName: "Linked List", totalProblems: 8, solvedProblems: 5, easyCount: 3, mediumCount: 2, hardCount: 0 }
-    ],
+    // Optional: lightweight tag summary (top tags attempted)
+    tagProgress: [],
     recentActivity: {
-      last30Days: [
-        { problem: 'Two Sum', difficulty: 'easy', solvedAt: new Date().toISOString() },
-        { problem: 'Valid Parentheses', difficulty: 'easy', solvedAt: new Date().toISOString() }
-      ],
-      thisWeek: [
-        { problem: 'Two Sum', difficulty: 'easy', solvedAt: new Date().toISOString() }
-      ],
+      last30Days: [],
+      thisWeek: [],
       today: []
     }
   };
 };
 
 export const getRecentActivity = async (userId: string) => {
-  // Mock implementation
-  return [
-    { 
-      type: 'problem_solved', 
-      problem: 'Two Sum', 
-      title: 'Two Sum',
-      difficulty: 'EASY',
-      timestamp: new Date().toISOString(),
-      description: 'Solved Two Sum problem using hash map approach'
-    },
-    { 
-      type: 'problem_attempted', 
-      problem: 'Valid Parentheses', 
-      title: 'Valid Parentheses',
-      difficulty: 'EASY',
-      timestamp: new Date().toISOString(),
-      description: 'Attempted Valid Parentheses using stack'
-    }
-  ];
+  const subs = await externalDb
+    .select()
+    .from(Submission)
+    .where(eq(Submission.userId, userId))
+    .orderBy(desc(Submission.createdAt))
+    .limit(20);
+
+  const qIds = Array.from(new Set(subs.map((s) => s.questionId)));
+  const qMap = new Map<string, (typeof questions)['$inferSelect']>();
+  if (qIds.length) {
+    const qs = await externalDb.select().from(questions).where(inArray(questions.id, qIds));
+    qs.forEach((q) => qMap.set(q.id, q));
+  }
+
+  return subs.map((s) => {
+    const q = qMap.get(s.questionId);
+    const solved = s.status === 'ACCEPTED';
+    return {
+      type: solved ? 'problem_solved' : 'problem_attempted',
+      problem: q?.slug ?? s.questionId,
+      title: slugToTitle(q?.slug) ?? q?.slug ?? s.questionId,
+      difficulty: q?.difficulty ?? 'EASY',
+      timestamp: s.createdAt ?? new Date().toISOString(),
+      description: `Status: ${s.status}`,
+    };
+  });
 };
 
 export const getFilteredQuestions = async ({ topics, userId, limit, unsolvedOnly }: {
@@ -72,154 +180,149 @@ export const getFilteredQuestions = async ({ topics, userId, limit, unsolvedOnly
   limit: number;
   unsolvedOnly?: boolean;
 }) => {
-  // Mock implementation - replace with actual database queries
-  const mockQuestions = [
-    {
-      id: '1',
-      title: 'Two Sum',
-      slug: 'two-sum',
-      difficulty: 'EASY',
-      points: 4,
-      leetcodeUrl: 'https://leetcode.com/problems/two-sum/',
-      inArena: true,
-      arenaAddedAt: new Date('2024-01-01'),
-      isSolved: false,
-      isBookmarked: false,
-      questionTags: [{ name: 'Array' }, { name: 'Hash Table' }]
-    },
-    {
-      id: '2',
-      title: 'Valid Parentheses',
-      slug: 'valid-parentheses',
-      difficulty: 'EASY',
-      points: 4,
-      leetcodeUrl: 'https://leetcode.com/problems/valid-parentheses/',
-      inArena: true,
-      arenaAddedAt: new Date('2024-01-02'),
-      isSolved: false,
-      isBookmarked: false,
-      questionTags: [{ name: 'Stack' }, { name: 'String' }]
-    },
-    {
-      id: '3',
-      title: 'Binary Tree Inorder Traversal',
-      slug: 'binary-tree-inorder-traversal',
-      difficulty: 'MEDIUM',
-      points: 6,
-      leetcodeUrl: 'https://leetcode.com/problems/binary-tree-inorder-traversal/',
-      inArena: true,
-      arenaAddedAt: new Date('2024-01-03'),
-      isSolved: false,
-      isBookmarked: false,
-      questionTags: [{ name: 'Tree' }, { name: 'Depth-First Search' }]
-    },
-    {
-      id: '4',
-      title: 'Binary Search',
-      slug: 'binary-search',
-      difficulty: 'EASY',
-      points: 4,
-      leetcodeUrl: 'https://leetcode.com/problems/binary-search/',
-      inArena: true,
-      arenaAddedAt: new Date('2024-01-04'),
-      isSolved: false,
-      isBookmarked: false,
-      questionTags: [{ name: 'Binary Search' }, { name: 'Array' }]
-    },
-    {
-      id: '5',
-      title: 'Two Sum II - Input Array Is Sorted',
-      slug: 'two-sum-ii-input-array-is-sorted',
-      difficulty: 'MEDIUM',
-      points: 6,
-      leetcodeUrl: 'https://leetcode.com/problems/two-sum-ii-input-array-is-sorted/',
-      inArena: true,
-      arenaAddedAt: new Date('2024-01-05'),
-      isSolved: false,
-      isBookmarked: false,
-      questionTags: [{ name: 'Two Pointers' }, { name: 'Array' }]
-    },
-    {
-      id: '6',
-      title: 'Longest Substring Without Repeating Characters',
-      slug: 'longest-substring-without-repeating-characters',
-      difficulty: 'MEDIUM',
-      points: 6,
-      leetcodeUrl: 'https://leetcode.com/problems/longest-substring-without-repeating-characters/',
-      inArena: true,
-      arenaAddedAt: new Date('2024-01-06'),
-      isSolved: false,
-      isBookmarked: false,
-      questionTags: [{ name: 'Sliding Window' }, { name: 'Hash Table' }, { name: 'String' }]
-    }
-  ];
-
-  // Normalize topics using the intelligent tag normalizer
   const normalizedTopics = new Set(normalizeTags(topics || []));
-  
-  console.log("🔍 Original topics:", topics);
-  console.log("🔍 Normalized topics:", Array.from(normalizedTopics));
 
-  // Filter by topics (case/format insensitive)
-  const filtered = mockQuestions.filter(q =>
-    q.questionTags.some(tag => normalizedTopics.has(tag.name.toUpperCase().replace(/\s+/g, '_')))
+  // Load all tags (keeps it simple and avoids dialect-specific functions)
+  const allTags = await externalDb.select().from(QuestionTag);
+  const wantedTagIds = allTags
+    .filter((t) => normalizedTopics.has(convertToScreamingSnakeCase(t.name || '')))
+    .map((t) => t.id);
+
+  if (wantedTagIds.length === 0) {
+    return { questionsWithSolvedStatus: [], individualPoints: 0 };
+  }
+
+  // Find questions linked to these tag IDs
+  const qTagLinks = await externalDb
+    .select()
+    .from(_QuestionToQuestionTag)
+    .where(inArray(_QuestionToQuestionTag.B, wantedTagIds))
+    .limit(2000);
+
+  const questionIds = Array.from(new Set(qTagLinks.map((l) => l.A)));
+  if (questionIds.length === 0) {
+    return { questionsWithSolvedStatus: [], individualPoints: 0 };
+  }
+
+  // Load questions and decorate with user-specific flags
+  const qs = await externalDb
+    .select()
+    .from(questions)
+    .where(inArray(questions.id, questionIds))
+    .limit(Math.min(Math.max(limit, 1), 100));
+
+  // User bookmarks
+  const bookmarks = await externalDb
+    .select()
+    .from(Bookmark)
+    .where(eq(Bookmark.userId, userId));
+  const bookmarkedSet = new Set(bookmarks.map((b) => b.questionId));
+
+  // Solved questions (distinct by questionId)
+  const userSubs = await externalDb
+    .select()
+    .from(Submission)
+    .where(eq(Submission.userId, userId));
+  const solvedSet = new Set(
+    userSubs.filter((s) => s.status === 'ACCEPTED').map((s) => s.questionId)
   );
-  
-  // Filter by solved status if requested
-  const finalQuestions = unsolvedOnly ? filtered.filter(q => !q.isSolved) : filtered;
-  
+
+  // Map questionId -> tag names for returned questions
+  const relevantQIds = qs.map((q) => q.id);
+  const tagLinksForQs = await externalDb
+    .select()
+    .from(_QuestionToQuestionTag)
+    .where(inArray(_QuestionToQuestionTag.A, relevantQIds));
+
+  const tagIdSet = Array.from(new Set(tagLinksForQs.map((l) => l.B)));
+  const tagRecords = tagIdSet.length
+    ? await externalDb.select().from(QuestionTag).where(inArray(QuestionTag.id, tagIdSet))
+    : [];
+  const tagMap = new Map(tagRecords.map((t) => [t.id, t.name] as const));
+
+  let items = qs.map((q) => {
+    const tNames = tagLinksForQs
+      .filter((l) => l.A === q.id)
+      .map((l) => tagMap.get(l.B))
+      .filter(Boolean) as string[];
+
+    return {
+      id: q.id,
+      title: slugToTitle(q.slug) ?? q.slug,
+      slug: q.slug,
+      difficulty: q.difficulty,
+      points: q.points,
+      leetcodeUrl: q.leetcodeUrl,
+      inArena: q.inArena,
+      arenaAddedAt: q.arenaAddedAt ?? undefined,
+      isSolved: solvedSet.has(q.id),
+      isBookmarked: bookmarkedSet.has(q.id),
+      questionTags: tNames.map((name) => ({ name }))
+    };
+  });
+
+  if (unsolvedOnly) items = items.filter((q) => !q.isSolved);
+
   return {
-    questionsWithSolvedStatus: finalQuestions.slice(0, limit),
-    individualPoints: 80
-  };
+    questionsWithSolvedStatus: items.slice(0, Math.min(Math.max(limit, 1), 100)),
+    individualPoints: (() => {
+      // Best-effort: fetch user's points if needed (already available in many calls)
+      // We avoid an extra DB call here; points can be omitted or 0 if not present
+      return 0;
+    })(),
+  } as any;
 };
 
 export const getTags = async () => {
-  // Mock implementation
-  return [
-    'Array', 'String', 'Linked List', 'Tree', 'Graph', 'Dynamic Programming',
-    'Greedy', 'Backtracking', 'Binary Search', 'Two Pointers', 'Sliding Window',
-    'Stack', 'Queue', 'Hash Table', 'Heap', 'Union Find'
-  ];
+  const rows = await externalDb.select().from(QuestionTag).orderBy(QuestionTag.name as any);
+  return rows.map((r) => r.name).filter((n): n is string => !!n);
 };
 
 export const getUserContextForPrompt = async (userId: string) => {
-  // Mock implementation - in real app, this would fetch user's learning context
+  const [user] = await externalDb.select().from(User).where(eq(User.id, userId));
+  const [config] = await externalDb
+    .select()
+    .from(UserConfig)
+    .where(eq(UserConfig.userEmail, user?.email ?? ''));
+
+  // Lightweight preference estimation: most seen tags in recent attempts
+  const recentSubs = await externalDb
+    .select()
+    .from(Submission)
+    .where(eq(Submission.userId, userId))
+    .orderBy(desc(Submission.createdAt))
+    .limit(100);
+
+  const qIds = Array.from(new Set(recentSubs.map((s) => s.questionId)));
+  const links = qIds.length
+    ? await externalDb
+        .select()
+        .from(_QuestionToQuestionTag)
+        .where(inArray(_QuestionToQuestionTag.A, qIds))
+    : [];
+  const tagIds = Array.from(new Set(links.map((l) => l.B)));
+  const tags = tagIds.length
+    ? await externalDb.select().from(QuestionTag).where(inArray(QuestionTag.id, tagIds))
+    : [];
+
+  const tagFreq = new Map<string, number>();
+  links.forEach((l) => {
+    const name = tags.find((t) => t.id === l.B)?.name;
+    if (!name) return;
+    tagFreq.set(name, (tagFreq.get(name) ?? 0) + 1);
+  });
+  const preferredTopics = Array.from(tagFreq.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([name]) => name);
+
   return {
-    currentLevel: 'beginner',
-    preferredTopics: ['Array', 'String'],
-    learningGoals: 'Master basic data structures',
+    currentLevel: (config?.rank as string) ?? 'novice_1',
+    preferredTopics: preferredTopics.length ? preferredTopics : ['Array', 'String'],
+    learningGoals: 'Improve fundamentals and pattern recognition with spaced repetition',
     timeAvailable: '1-2 hours per day',
     weakAreas: ['Dynamic Programming', 'Graph Algorithms'],
-    preferences: 'Visual learning with examples',
-    progress: 'Consistent daily practice'
+    preferences: 'Prefers step-by-step hints and visual mental models',
+    progress: (recentSubs.length ? 'Consistent recent practice' : 'Needs a fresh start'),
   };
-};
-
-export const getCodeSubmissionsByUser = async ({ externalUserId }: { externalUserId: string }) => {
-  // Mock implementation - replace with actual database queries
-  return [
-    {
-      id: '1',
-      externalUserId,
-      questionSlug: 'two-sum',
-      code: 'function twoSum(nums, target) {\n  const map = new Map();\n  for (let i = 0; i < nums.length; i++) {\n    const complement = target - nums[i];\n    if (map.has(complement)) {\n      return [map.get(complement), i];\n    }\n    map.set(nums[i], i);\n  }\n  return [];\n}',
-      language: 'javascript',
-      problemTitle: 'Two Sum',
-      submissionStatus: 'ACCEPTED',
-      createdAt: new Date('2024-01-15'),
-      updatedAt: new Date('2024-01-15')
-    },
-    {
-      id: '2',
-      externalUserId,
-      questionSlug: 'valid-parentheses',
-      code: 'function isValid(s) {\n  const stack = [];\n  const pairs = {\n    ")": "(", "}": "{", "]": "["\n  };\n  \n  for (let char of s) {\n    if (pairs[char]) {\n      if (stack.pop() !== pairs[char]) return false;\n    } else {\n      stack.push(char);\n    }\n  }\n  \n  return stack.length === 0;\n}',
-      language: 'javascript',
-      problemTitle: 'Valid Parentheses',
-      submissionStatus: 'ACCEPTED',
-      createdAt: new Date('2024-01-16'),
-      updatedAt: new Date('2024-01-16')
-    }
-  ];
 };

@@ -1,13 +1,16 @@
 // lib/externalDb.ts
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
-import * as externalSchema from '../models/algo-schema'; // adjust path
+import * as externalSchema from '../models/algo-schema';
 
-// External DB connection string (you can hardcode or use .env)
-const externalClient = postgres(process.env.EXTERNAL_DATABASE_URL!, {
-  max: 5, // optional: keep it light
-});
+if (!process.env.EXTERNAL_DATABASE_URL) {
+  throw new Error('EXTERNAL_DATABASE_URL environment variable is not set');
+}
 
-export const externalDb = drizzle(externalClient, {
-  schema: externalSchema,
-});
+const externalClient = postgres(process.env.EXTERNAL_DATABASE_URL, { max: 5 });
+
+export const externalDb = drizzle(externalClient, { schema: externalSchema });
+
+export const closeExternalDb = async () => {
+  await externalClient.end();
+};

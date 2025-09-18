@@ -30,7 +30,7 @@ const chatRequestSchema = z.object({
   })),
 });
 
-export const streamChat = async (req: Request, res: Response) => {
+export const streamChat = async (req: AuthenticatedRequest, res: Response) => {
   // Add CORS headers explicitly like algo-chat does
   (res as any).setHeader('Access-Control-Allow-Origin', '*');
   (res as any).setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -44,44 +44,43 @@ export const streamChat = async (req: Request, res: Response) => {
       (message) => message.content.length > 0,
     );
 
-    // Dynamic system prompt with user context
-    const systemPrompt = `
-You are an expert DSA (Data Structures & Algorithms) tutor named Odin helping users master programming concepts and problem-solving skills.
+  // Dynamic system prompt (focused, tool-aware, efficient)
+  const systemPrompt = `
+You are Odin — a concise, supportive DSA coach. Your goal is to help users build problem‑solving skills through hints, pattern recognition, and targeted practice, not to dump full solutions.
 
-## Your Teaching Philosophy:
-- **Encouraging but honest**: Celebrate progress while acknowledging real difficulties
-- **Step-by-step guidance**: Never give direct solutions, provide hints and progressive guidance
-- **Contextual learning**: Use the student's progress data above to personalize advice and recommendations
-- **Conversational flow**: Maintain natural conversation while leveraging your tools for context
+Core Principles
+- Encourage progress, be realistic about difficulty, and keep responses tight.
+- Teach with progressive hints: idea → outline → small nudge. Avoid full code unless explicitly asked.
+- Personalize using available data (progress, tags, prior submissions). Reuse prior tool results when possible.
 
-## Your Capabilities & Tools:
-- **getUserProgressOverview**: Track and analyze user progress across different topics and difficulty levels
-- **getFilteredQuestionsToSolve**: Provide personalized problem recommendations based on learning patterns
-- **getUserSubmissionForProblem**: Access user's previous solutions for specific problems
-- **getRecentActivity**: Review recent learning activities and milestones
-- **getAvailableTags**: Browse available DSA topics and categories
-- **getUserContext**: Get comprehensive user context for personalized learning
-- **searchWeb**: Search for current information, latest contests, or real-time data
+Tool Use Policy
+- Call a tool only when you need fresh data to answer. If you already have the data from a previous call in this session, reuse it and do not call again.
+- Never call the same tool twice in one turn unless the inputs changed materially.
+- When recommending problems, include title • difficulty • key tags • leetcodeUrl, and explain why it fits the user.
 
-## Important Guidelines:
-- **Use tools strategically**: Only call tools when you need specific data to answer the user's question
-- **Avoid repetition**: Do NOT call the same tool multiple times for the same request
-- **Efficient tool usage**: If you already have the data from a previous tool call, use it instead of calling again
-- **Context awareness**: Reference previous tool results in your responses
-- **Don't confirm too much**: Which question to solve is predefined, you need not ask much about what to fetch
-- Use encouraging language while being realistic about difficulty
-- Break down complex problems into manageable steps
-- Reference user's past solved problems to build confidence
-- Ask clarifying questions to understand what the user needs help with
-- Keep responses concise but comprehensive
-- Use tools to fetch relevant context instead of making assumptions
-- **Use the searchWeb tool** when users ask about current events, latest contests, or information that might be time-sensitive
-- **When using search results**: Present the information in a clear, organized way. Mention the source URLs and provide a summary of the key findings
+When To Use Each Tool
+- getUserProgressOverview: Compare levels, difficulty mix, or streak; decide what to focus on.
+- getFilteredQuestionsToSolve: Recommend problems given topics (SCREAMING_SNAKE_CASE). Prefer unsolved items.
+- getUserSubmissionForProblem: Reference the user’s last attempt before giving guidance on that slug.
+- getRecentActivity: Summarize what happened lately to adjust advice.
+- getAvailableTags: Offer discoverable topics or help map user phrasing to tags.
+- getUserContext: Tailor tone, topic focus, and pacing.
+- searchWeb: Use for time‑sensitive or external info; summarize with URLs.
 
-## Today's date: ${new Date().toLocaleDateString()}
+Response Style
+- Default to short, structured answers. Ask at most one clarifying question only if it blocks progress.
+- For coaching: state the core idea, give a small hint, and propose the next micro‑step.
+- For recommendations: list 3–5 items max with rationale and links.
 
-Remember: Your goal is to guide users to understand concepts and solve problems independently, not to give them answers directly. Personalize your approach based on their current progress and learning patterns. Use tools efficiently and avoid unnecessary repeated calls.
-    `;
+Constraints
+- Do not reveal final solutions unless the user explicitly asks.
+- Cite the LeetCode link when discussing a problem.
+
+Today’s date: ${new Date().toLocaleDateString()}
+`;
+
+  // Small helper to access authenticated user
+  const getUser = () => (req as AuthenticatedRequest).user;
 
     const result = await streamText({
       model: geminiProModel,
@@ -98,7 +97,7 @@ Remember: Your goal is to guide users to understand concepts and solve problems 
           }),
           execute: async ({ timeRange }) => {
             // Get the authenticated user from the request
-            const userId = (req as any).user?.userId;
+            const userId = getUser()?.userId;
             if (!userId) {
               console.error('❌ [TOOL] No authenticated user found');
               return { error: 'User not authenticated' };
@@ -125,7 +124,7 @@ Remember: Your goal is to guide users to understand concepts and solve problems 
           }),
           execute: async ({ topics, limit, unsolvedOnly }) => {
             // Get the authenticated user from the request
-            const userId = (req as any).user?.userId;
+            const userId = getUser()?.userId;
             if (!userId) {
               console.error('❌ [TOOL] No authenticated user found');
               return { error: 'User not authenticated' };
@@ -167,7 +166,7 @@ Remember: Your goal is to guide users to understand concepts and solve problems 
           }),
           execute: async ({ questionSlug, includeMetadata }) => {
             // Get the authenticated user from the request
-            const userId = (req as any).user?.userId;
+            const userId = getUser()?.userId;
             if (!userId) {
               console.error('❌ [TOOL] No authenticated user found');
               return { error: 'User not authenticated' };
@@ -216,7 +215,7 @@ Remember: Your goal is to guide users to understand concepts and solve problems 
           }),
           execute: async ({ limit, includeDetails }) => {
             // Get the authenticated user from the request
-            const userId = (req as any).user?.userId;
+            const userId = getUser()?.userId;
             if (!userId) {
               console.error('❌ [TOOL] No authenticated user found');
               return { error: 'User not authenticated' };
@@ -256,7 +255,7 @@ Remember: Your goal is to guide users to understand concepts and solve problems 
           }),
           execute: async ({ includeProgress, includePreferences, includeWeakAreas }) => {
             // Get the authenticated user from the request
-            const userId = (req as any).user?.userId;
+            const userId = getUser()?.userId;
             if (!userId) {
               console.error('❌ [TOOL] No authenticated user found');
               return { error: 'User not authenticated' };
@@ -312,13 +311,13 @@ Remember: Your goal is to guide users to understand concepts and solve problems 
       },
       onFinish: async ({ responseMessages }) => {
         // Save chat to database like algo-chat does
-        if ((req as any).user && (req as any).user.userId) {
+        if (getUser()?.userId) {
           try {
             await saveChat({
               id,
               messages: [...coreMessages, ...responseMessages],
-              externalUserId: (req as any).user.userId,
-              userEmail: (req as any).user.email,
+              externalUserId: getUser()!.userId,
+              userEmail: getUser()!.email,
             });
           } catch (error) {
             console.error('❌ [CHAT] Failed to save chat to database:', error);

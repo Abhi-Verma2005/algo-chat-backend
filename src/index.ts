@@ -15,7 +15,9 @@ if (process.env.VERBOSE_LOGS !== 'true') {
 }
 
 import express, { Router } from 'express';
+import net from 'net';
 import cors from 'cors';
+import { corsMiddleware } from '@/middleware/cors';
 import helmet from 'helmet';
 import authRoutes from './routes/auth';
 import chatRoutes from './routes/chat';
@@ -25,13 +27,10 @@ import searchRoutes from './routes/search';
 
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const START_PORT: number = parseInt(process.env.PORT || '3001', 10);
 
-// Simplified CORS - let individual routes handle their own CORS headers
-app.use(cors({
-  origin: true, // Allow all origins
-  credentials: true,
-}));
+// Centralized CORS configuration
+app.use(corsMiddleware);
 
 // Other middleware after CORS
 app.use(helmet());
@@ -57,6 +56,16 @@ app.get('/health', (req, res) => {
     status: 'ok', 
     timestamp: new Date().toISOString(),
     message: 'Algo Chat Backend is running'
+  });
+});
+
+// Version endpoint
+app.get('/version', (req, res) => {
+  res.json({
+    name: 'algo-chat-backend',
+    version: process.env.npm_package_version || '1.0.0',
+    node: process.version,
+    env: process.env.NODE_ENV || 'development'
   });
 });
 
@@ -166,4 +175,38 @@ app.use('*', (req, res) => {
   });
 });
 
-app.listen(PORT, () => {});
+async function getAvailablePort(start: number, maxTries = 20): Promise<number> {
+  let port = start;
+  for (let i = 0; i < maxTries; i++) {
+    const isFree = await new Promise<boolean>((resolve) => {
+      const tester = net.createServer()
+        .once('error', () => resolve(false))
+        .once('listening', () => {
+          tester.close(() => resolve(true));
+        })
+        .listen(port);
+    });
+    if (isFree) return port;
+    port += 1;
+  }
+  return start; // fallback to start if none found
+}
+
+(async () => {
+  const port = await getAvailablePort(START_PORT);
+  const server = app.listen(port, () => {
+    console.info(`Server listening on port ${port}`);
+  });
+
+  // Graceful shutdown
+  const shutdown = () => {
+    console.info('Shutting down server...');
+    server.close(() => {
+      console.info('HTTP server closed');
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+})();

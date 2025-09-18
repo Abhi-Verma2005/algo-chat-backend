@@ -1,5 +1,6 @@
 import express, { Router } from 'express';
 import { authenticateToken } from '../middleware/auth';
+import { chatRateLimiter } from '@/middleware/rate-limit';
 import { 
   createChat, 
   getChat, 
@@ -23,8 +24,9 @@ router.options('/stream', (req: any, res: any) => {
   res.status(200).end();
 });
 
-// All chat routes require authentication
+// All chat routes require authentication and rate limiting
 router.use(authenticateToken);
+router.use(chatRateLimiter);
 
 // Post-auth middleware (no logs)
 router.use((req: any, res: any, next: any) => next());
@@ -42,14 +44,14 @@ router.post('/stream', async (req: any, res: any) => {
 // POST /chat - Create a new chat
 router.post('/', createChat);
 
-// GET /chat/:id - Get a specific chat
-router.get('/:id', getChat);
-
 // GET /chat - Get all chats for the authenticated user
 router.get('/', getUserChats);
 
 // GET /chat/history - Get chat history (alias for GET /chat)
 router.get('/history', getUserChats);
+
+// GET /chat/recent - Recent chats (additional alias)
+router.get('/recent', getUserChats);
 
 // GET /chat/debug - Debug endpoint to see raw database data
 router.get('/debug', async (req: any, res: any) => {
@@ -84,6 +86,9 @@ router.get('/debug', async (req: any, res: any) => {
     res.status(500).json({ success: false, message: 'Debug failed' });
   }
 });
+
+// GET /chat/:id - Get a specific chat (placed after static routes)
+router.get('/:id', getChat);
 
 // DELETE /chat/:id - Delete a specific chat
 router.delete('/:id', deleteChat);

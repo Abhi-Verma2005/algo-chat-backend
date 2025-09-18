@@ -1,7 +1,11 @@
 import express from 'express';
+import { authRateLimiter } from '@/middleware/rate-limit';
 import { login, verifyToken, refreshToken } from '../controllers/auth-controller';
 
 const router = express.Router();
+
+// Apply rate limiting to all auth routes
+router.use(authRateLimiter);
 
 // POST /auth/login - User login
 router.post('/login', login);
