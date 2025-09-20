@@ -9,7 +9,8 @@ import {
   getRecentActivity, 
   getFilteredQuestions, 
   getTags, 
-  getUserContextForPrompt 
+  getUserContextForPrompt,
+  getQuestionsByPlatform
 } from '@/services/ai-actions';
 import { 
   saveChat, 
@@ -56,11 +57,12 @@ Core Principles
 Tool Use Policy
 - Call a tool only when you need fresh data to answer. If you already have the data from a previous call in this session, reuse it and do not call again.
 - Never call the same tool twice in one turn unless the inputs changed materially.
-- When recommending problems, include title • difficulty • key tags • leetcodeUrl, and explain why it fits the user.
+- When recommending problems, include title • difficulty • key tags • platform link (leetcodeUrl or codechefUrl), and explain why it fits the user.
 
 When To Use Each Tool
 - getUserProgressOverview: Compare levels, difficulty mix, or streak; decide what to focus on.
 - getFilteredQuestionsToSolve: Recommend problems given topics (SCREAMING_SNAKE_CASE). Prefer unsolved items.
+- getPlatformQuestionsOnly: When user asks for strictly platform-specific questions (e.g., "CodeChef only" or "LeetCode only"). Return ONLY slug and url.
 - getUserSubmissionForProblem: Reference the user’s last attempt before giving guidance on that slug.
 - getRecentActivity: Summarize what happened lately to adjust advice.
 - getAvailableTags: Offer discoverable topics or help map user phrasing to tags.
@@ -74,7 +76,10 @@ Response Style
 
 Constraints
 - Do not reveal final solutions unless the user explicitly asks.
-- Cite the LeetCode link when discussing a problem.
+- Cite the platform link when discussing a problem (LeetCode or CodeChef).
+
+Strict Platform Responses
+- If the user requests only CodeChef or only LeetCode problems, call getPlatformQuestionsOnly and respond with just a compact list of {slug, url}. No extra commentary unless asked.
 
 Today’s date: ${new Date().toLocaleDateString()}
 `;
@@ -272,6 +277,29 @@ Today’s date: ${new Date().toLocaleDateString()}
               };
             }
           },
+        },
+        getPlatformQuestionsOnly: {
+          description: "Return ONLY {slug, url} pairs for a specific platform (LEETCODE or CODECHEF). Ideal for 'give me CodeChef questions' requests.",
+          parameters: z.object({
+            platform: z.enum(['LEETCODE', 'CODECHEF']).describe('Target platform for questions'),
+            limit: z.number().min(1).max(100).default(10).describe('How many questions to fetch'),
+            topics: z.array(z.string()).optional().describe('Optional SCREAMING_SNAKE_CASE tag filters'),
+            unsolvedOnly: z.boolean().optional().describe('If true, exclude questions the user has already solved')
+          }),
+          execute: async ({ platform, limit, topics, unsolvedOnly }) => {
+            const userId = getUser()?.userId;
+            if (!userId) {
+              console.error('❌ [TOOL] No authenticated user found');
+              return { error: 'User not authenticated' };
+            }
+            try {
+              const res = await getQuestionsByPlatform({ platform, userId, limit, topics: topics ?? [], unsolvedOnly: !!unsolvedOnly });
+              return res;
+            } catch (error) {
+              console.error('❌ [TOOL] getPlatformQuestionsOnly error:', error);
+              return { error: 'Failed to fetch platform questions' };
+            }
+          }
         },
         searchWeb: {
           description: "Search the web for current information, latest news, or real-time data that might not be in the AI's training data",

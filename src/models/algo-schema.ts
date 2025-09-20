@@ -7,7 +7,7 @@ const generateUUID = () => Math.random().toString(36).substring(2) + Date.now().
 // Enums
 export const contestStatusEnum = pgEnum('ContestStatus', ['UPCOMING', 'ACTIVE', 'COMPLETED']);
 export const difficultyEnum = pgEnum('Difficulty', ['BEGINNER', 'EASY', 'MEDIUM', 'HARD', 'VERYHARD']);
-export const questionPlatformEnum = pgEnum('QuestionPlatform', ['LEETCODE', 'CODEFORCES']);
+export const questionPlatformEnum = pgEnum('QuestionPlatform', ['LEETCODE', 'CODEFORCES', 'CODECHEF']);
 export const submissionStatusEnum = pgEnum('SubmissionStatus', [
   'PENDING',
   'ACCEPTED',
@@ -41,6 +41,7 @@ export const User = pgTable('User', {
   email: varchar('email').notNull().unique(),
   password: varchar('password').notNull(),
   leetcodeUsername: varchar('leetcodeUsername').unique(),
+  codechefUsername: varchar('codechefUsername').unique(),
   isComplete: boolean('isComplete'),
   codeforcesUsername: varchar('codeforcesUsername').unique(),
   section: varchar('section'),
@@ -116,6 +117,7 @@ export const GroupOnContest = pgTable('GroupOnContest', {
 export const questions = pgTable('questions', {
   id: varchar('id').primaryKey().$defaultFn(() => generateUUID()),
   leetcodeUrl: varchar('leetcodeUrl').unique(),
+  codechefUrl: varchar('codechefUrl').unique(),
   codeforcesUrl: varchar('codeforcesUrl').unique(),
   difficulty: difficultyEnum('difficulty').notNull(),
   points: integer('points').notNull(),
@@ -244,6 +246,16 @@ export const LeetCodeStats = pgTable('LeetCodeStats', {
   easySolved: integer('easySolved').default(0),
   mediumSolved: integer('mediumSolved').default(0),
   hardSolved: integer('hardSolved').default(0),
+  lastUpdated: timestamp('lastUpdated').defaultNow(),
+});
+
+export const CodeChefStats = pgTable('CodeChefStats', {
+  id: varchar('id').primaryKey().$defaultFn(() => generateUUID()),
+  username: varchar('username').notNull().unique(),
+  email: varchar('email').notNull(),
+  codechefUsername: varchar('codechefUsername').notNull(),
+  userProfileUrl: varchar('userProfileUrl'),
+  totalSolved: integer('totalSolved').default(0),
   lastUpdated: timestamp('lastUpdated').defaultNow(),
 });
 

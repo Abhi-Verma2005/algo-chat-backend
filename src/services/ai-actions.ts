@@ -12,6 +12,7 @@ import {
   difficultyEnum
 } from '@/models/algo-schema';
 import { normalizeTags, convertToScreamingSnakeCase } from '@/utils/tag-normalizer';
+import { CodeChefStats } from '@/models/algo-schema';
 
 type Difficulty = 'BEGINNER' | 'EASY' | 'MEDIUM' | 'HARD' | 'VERYHARD';
 
@@ -44,6 +45,13 @@ export const getUserProgress = async (userId: string, options: { timeRange: stri
     .select()
     .from(LeetCodeStats)
     .where(eq(LeetCodeStats.leetcodeUsername, user?.leetcodeUsername ?? ''));
+
+  const [ccStats] = user?.email
+    ? await externalDb
+        .select()
+        .from(CodeChefStats)
+        .where(eq(CodeChefStats.email, user.email))
+    : [undefined as any];
 
   // Time window filter (optional simple filtering on createdAt)
   const now = new Date();
@@ -115,10 +123,12 @@ export const getUserProgress = async (userId: string, options: { timeRange: stri
     user: {
       username: user?.username ?? '',
       leetcodeUsername: user?.leetcodeUsername ?? '',
+      codechefUsername: (user as any)?.codechefUsername ?? '',
       enrollmentNum: user?.enrollmentNum ?? '',
       section: user?.section ?? '',
       individualPoints: user?.individualPoints ?? 0,
       leetcodeQuestionsSolved: lcStats?.totalSolved ?? config?.leetcode_questions_solved ?? totalSolved,
+      codechefQuestionsSolved: ccStats?.totalSolved ?? 0,
       codeforcesQuestionsSolved: config?.codeforces_questions_solved ?? 0,
       rank: (config?.rank as string) ?? 'novice_1',
       userBrief:
@@ -174,13 +184,27 @@ export const getRecentActivity = async (userId: string) => {
   });
 };
 
-export const getFilteredQuestions = async ({ topics, userId, limit, unsolvedOnly }: {
+export const getFilteredQuestions = async ({ topics, userId, limit, unsolvedOnly, platform, difficulty, slug, url }: {
   topics: string[];
   userId: string;
   limit: number;
   unsolvedOnly?: boolean;
+  platform?: 'LEETCODE' | 'CODECHEF' | 'CODEFORCES';
+  difficulty?: Difficulty | Difficulty[];
+  slug?: string;
+  url?: string;
 }) => {
   const normalizedTopics = new Set(normalizeTags(topics || []));
+
+  // Detect platform bias from topics
+  let wantsCodeChef = normalizedTopics.has('CODECHEF');
+  let wantsLeetCode = normalizedTopics.has('LEETCODE');
+  let wantsCodeforces = normalizedTopics.has('CODEFORCES');
+
+  // Explicit platform overrides inferred topics if provided
+  if (platform === 'CODECHEF') { wantsCodeChef = true; wantsLeetCode = false; wantsCodeforces = false; }
+  if (platform === 'LEETCODE') { wantsLeetCode = true; wantsCodeChef = false; wantsCodeforces = false; }
+  if (platform === 'CODEFORCES') { wantsCodeforces = true; wantsLeetCode = false; wantsCodeChef = false; }
 
   // Load all tags (keeps it simple and avoids dialect-specific functions)
   const allTags = await externalDb.select().from(QuestionTag);
@@ -188,28 +212,39 @@ export const getFilteredQuestions = async ({ topics, userId, limit, unsolvedOnly
     .filter((t) => normalizedTopics.has(convertToScreamingSnakeCase(t.name || '')))
     .map((t) => t.id);
 
-  if (wantedTagIds.length === 0) {
-    return { questionsWithSolvedStatus: [], individualPoints: 0 };
-  }
+  // Platform-only request without explicit tags: fall back to broad pool
+  const platformOnly = wantedTagIds.length === 0 && (wantsCodeChef || wantsLeetCode || wantsCodeforces);
 
   // Find questions linked to these tag IDs
-  const qTagLinks = await externalDb
-    .select()
-    .from(_QuestionToQuestionTag)
-    .where(inArray(_QuestionToQuestionTag.B, wantedTagIds))
-    .limit(2000);
+  const qTagLinks = platformOnly
+    ? []
+    : await externalDb
+        .select()
+        .from(_QuestionToQuestionTag)
+        .where(inArray(_QuestionToQuestionTag.B, wantedTagIds))
+        .limit(2000);
 
-  const questionIds = Array.from(new Set(qTagLinks.map((l) => l.A)));
-  if (questionIds.length === 0) {
-    return { questionsWithSolvedStatus: [], individualPoints: 0 };
-  }
+  const questionIds = platformOnly ? [] : Array.from(new Set(qTagLinks.map((l) => l.A)));
 
   // Load questions and decorate with user-specific flags
-  const qs = await externalDb
-    .select()
-    .from(questions)
-    .where(inArray(questions.id, questionIds))
-    .limit(Math.min(Math.max(limit, 1), 100));
+  let qs = [] as (typeof questions)['$inferSelect'][];
+  if (platformOnly) {
+    // Broad sample; we'll filter by URL presence per platform
+    qs = await externalDb
+      .select()
+      .from(questions)
+      .orderBy(desc(questions.createdAt as any))
+      .limit(500);
+  } else {
+    if (questionIds.length === 0) {
+      return { questionsWithSolvedStatus: [], individualPoints: 0 };
+    }
+    qs = await externalDb
+      .select()
+      .from(questions)
+      .where(inArray(questions.id, questionIds))
+      .limit(Math.min(Math.max(limit, 1), 100));
+  }
 
   // User bookmarks
   const bookmarks = await externalDb
@@ -229,10 +264,12 @@ export const getFilteredQuestions = async ({ topics, userId, limit, unsolvedOnly
 
   // Map questionId -> tag names for returned questions
   const relevantQIds = qs.map((q) => q.id);
-  const tagLinksForQs = await externalDb
-    .select()
-    .from(_QuestionToQuestionTag)
-    .where(inArray(_QuestionToQuestionTag.A, relevantQIds));
+  const tagLinksForQs = relevantQIds.length
+    ? await externalDb
+        .select()
+        .from(_QuestionToQuestionTag)
+        .where(inArray(_QuestionToQuestionTag.A, relevantQIds))
+    : [];
 
   const tagIdSet = Array.from(new Set(tagLinksForQs.map((l) => l.B)));
   const tagRecords = tagIdSet.length
@@ -253,6 +290,7 @@ export const getFilteredQuestions = async ({ topics, userId, limit, unsolvedOnly
       difficulty: q.difficulty,
       points: q.points,
       leetcodeUrl: q.leetcodeUrl,
+      codechefUrl: (q as any).codechefUrl,
       inArena: q.inArena,
       arenaAddedAt: q.arenaAddedAt ?? undefined,
       isSolved: solvedSet.has(q.id),
@@ -260,6 +298,33 @@ export const getFilteredQuestions = async ({ topics, userId, limit, unsolvedOnly
       questionTags: tNames.map((name) => ({ name }))
     };
   });
+
+  // Apply platform filters
+  if (wantsCodeChef) items = items.filter((q) => !!q.codechefUrl);
+  if (wantsLeetCode) items = items.filter((q) => !!q.leetcodeUrl);
+  if (wantsCodeforces) items = items.filter((q) => !!(q as any).codeforcesUrl);
+
+  // Apply difficulty filter if supplied
+  if (difficulty) {
+    const set = new Set(Array.isArray(difficulty) ? difficulty : [difficulty]);
+    items = items.filter((q) => set.has(q.difficulty as Difficulty));
+  }
+
+  // Apply slug/url filter if supplied
+  if (slug) {
+    const s = slug.trim().toLowerCase();
+    items = items.filter((q) => q.slug?.toLowerCase() === s);
+  } else if (url) {
+    const u = url.trim().toLowerCase();
+    const lastPart = u.split('/').filter(Boolean).pop();
+    if (lastPart) {
+      items = items.filter((q) => q.slug?.toLowerCase() === lastPart);
+    } else {
+      // fallback: by platform domain
+      if (u.includes('leetcode')) items = items.filter((q) => !!q.leetcodeUrl);
+      if (u.includes('codechef')) items = items.filter((q) => !!q.codechefUrl);
+    }
+  }
 
   if (unsolvedOnly) items = items.filter((q) => !q.isSolved);
 
@@ -325,4 +390,80 @@ export const getUserContextForPrompt = async (userId: string) => {
     preferences: 'Prefers step-by-step hints and visual mental models',
     progress: (recentSubs.length ? 'Consistent recent practice' : 'Needs a fresh start'),
   };
+};
+
+// Minimal platform-specific question fetcher returning only slug and platform URL
+// platform: 'LEETCODE' | 'CODECHEF'
+export const getQuestionsByPlatform = async ({
+  platform,
+  userId,
+  limit = 10,
+  topics = [],
+  unsolvedOnly = false,
+}: {
+  platform: 'LEETCODE' | 'CODECHEF';
+  userId: string;
+  limit?: number;
+  topics?: string[];
+  unsolvedOnly?: boolean;
+}) => {
+  const cappedLimit = Math.min(Math.max(limit ?? 10, 1), 100);
+
+  // Optional tag filtering
+  const normalizedTopics = new Set(normalizeTags(topics || []));
+  const allTags = await externalDb.select().from(QuestionTag);
+  const wantedTagIds = allTags
+    .filter((t) => normalizedTopics.has(convertToScreamingSnakeCase(t.name || '')))
+    .map((t) => t.id);
+
+  let qIds: string[] | null = null;
+  if (wantedTagIds.length > 0) {
+    const links = await externalDb
+      .select()
+      .from(_QuestionToQuestionTag)
+      .where(inArray(_QuestionToQuestionTag.B, wantedTagIds))
+      .limit(5000);
+    qIds = Array.from(new Set(links.map((l) => l.A)));
+  }
+
+  // Load a reasonable pool and filter in-memory for portability
+  let pool = [] as (typeof questions)['$inferSelect'][];
+  if (qIds && qIds.length > 0) {
+    pool = await externalDb
+      .select()
+      .from(questions)
+      .where(inArray(questions.id, qIds))
+      .limit(1000);
+  } else {
+    pool = await externalDb
+      .select()
+      .from(questions)
+      .orderBy(desc(questions.createdAt as any))
+      .limit(1000);
+  }
+
+  // Solved filter support
+  let solvedSet = new Set<string>();
+  if (unsolvedOnly) {
+    const subs = await externalDb
+      .select()
+      .from(Submission)
+      .where(eq(Submission.userId, userId));
+    solvedSet = new Set(subs.filter((s) => s.status === 'ACCEPTED').map((s) => s.questionId));
+  }
+
+  const items = pool
+    .filter((q) => {
+      if (platform === 'LEETCODE') return !!q.leetcodeUrl;
+      if (platform === 'CODECHEF') return !!(q as any).codechefUrl;
+      return false;
+    })
+    .filter((q) => (unsolvedOnly ? !solvedSet.has(q.id) : true))
+    .slice(0, cappedLimit)
+    .map((q) => ({
+      slug: q.slug,
+      url: platform === 'LEETCODE' ? (q.leetcodeUrl as string) : ((q as any).codechefUrl as string),
+    }));
+
+  return { questions: items };
 };

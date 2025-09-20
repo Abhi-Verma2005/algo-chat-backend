@@ -5,6 +5,9 @@ import {
   getCodeSubmissionsByUser, 
   getCodeSubmissionById 
 } from '../services/queries';
+import { externalDb } from '@/lib/algo-db';
+import { Submission, questions } from '@/models/algo-schema';
+import { eq } from 'drizzle-orm';
 
 export const createSubmission = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -35,6 +38,36 @@ export const createSubmission = async (req: AuthenticatedRequest, res: Response)
       problemTitle,
       submissionStatus: submissionStatus || 'accepted',
     });
+
+    // Also mirror to external Submission table for solved-status parity
+    try {
+      // Lookup question by slug in external DB
+      const found = await externalDb
+        .select()
+        .from(questions)
+        .where(eq(questions.slug, questionSlug));
+      const q = found?.[0];
+
+      if (q?.id) {
+        // Normalize status to enum
+        const raw = (submissionStatus || 'accepted').toString().trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+        const allowed = new Set([
+          'PENDING', 'ACCEPTED', 'WRONG_ANSWER', 'TIME_LIMIT_EXCEEDED', 'MEMORY_LIMIT_EXCEEDED', 'RUNTIME_ERROR', 'COMPILATION_ERROR'
+        ]);
+        const status = allowed.has(raw) ? (raw as any) : (raw.includes('ACCEPT') ? 'ACCEPTED' : 'PENDING');
+
+        await externalDb.insert(Submission).values({
+          userId,
+          questionId: q.id,
+          status: status as any,
+          score: 0,
+          createdAt: new Date(),
+        });
+      }
+    } catch (mirrorErr) {
+      console.error('Mirror to external Submission failed:', mirrorErr);
+      // non-blocking
+    }
 
     res.json({
       success: true,

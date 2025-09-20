@@ -188,6 +188,21 @@ const TAG_MAPPINGS: Record<string, string> = {
   'disjoint sets': '1D_ARRAYS'
 };
 
+// Platform keywords (helps route platform-only requests)
+// These aren't strict tags in DB but help map user intent
+// e.g., topics: ['codechef'] should bias to CodeChef problems
+const PLATFORM_MAPPINGS: Record<string, string> = {
+  'leetcode': 'LEETCODE',
+  'leet code': 'LEETCODE',
+  'lc': 'LEETCODE',
+  'codechef': 'CODECHEF',
+  'code chef': 'CODECHEF',
+  'cc': 'CODECHEF',
+  'codeforces': 'CODEFORCES',
+  'code forces': 'CODEFORCES',
+  'cf': 'CODEFORCES',
+};
+
 /**
  * Normalizes a user input string to a standardized SCREAMING_SNAKE_CASE tag
  * @param input - The user input string
@@ -199,6 +214,11 @@ export function normalizeTag(input: string): string | null {
   }
   
   const normalizedInput = input.trim().toLowerCase();
+
+  // Platform keyword direct mapping
+  if (PLATFORM_MAPPINGS[normalizedInput]) {
+    return PLATFORM_MAPPINGS[normalizedInput];
+  }
   
   // Direct match
   if (TAG_MAPPINGS[normalizedInput]) {
@@ -207,6 +227,13 @@ export function normalizeTag(input: string): string | null {
   
   // Check for partial matches and variations
   for (const [key, value] of Object.entries(TAG_MAPPINGS)) {
+    if (normalizedInput.includes(key) || key.includes(normalizedInput)) {
+      return value;
+    }
+  }
+
+  // Platform partials
+  for (const [key, value] of Object.entries(PLATFORM_MAPPINGS)) {
     if (normalizedInput.includes(key) || key.includes(normalizedInput)) {
       return value;
     }
@@ -259,7 +286,7 @@ export function normalizeTags(inputs: string[]): string[] {
  * @returns Array of all available tags
  */
 export function getAvailableTags(): string[] {
-  return Object.values(TAG_MAPPINGS);
+  return [...new Set([...Object.values(TAG_MAPPINGS), ...Object.values(PLATFORM_MAPPINGS)])];
 }
 
 /**
