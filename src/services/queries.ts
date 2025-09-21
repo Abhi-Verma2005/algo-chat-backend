@@ -1,5 +1,5 @@
 import { genSaltSync, hashSync, compareSync } from "bcryptjs";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { db } from "../lib/database";
 import { externalDb } from "../lib/algo-db";
 import { chat, codeSubmissions } from "../models/schema";
@@ -156,16 +156,40 @@ export async function saveCodeSubmission({
   submissionStatus: string;
 }) {
   try {
-    return await db.insert(codeSubmissions).values({
+    // Normalize status and only persist accepted solutions
+    const normalized = (submissionStatus || '').toString().trim().toLowerCase();
+    const isAccepted = normalized === 'accepted' || normalized === 'accept' || normalized === 'ac';
+    if (!isAccepted) {
+      // Do not store non-accepted code submissions
+      return { skipped: true, reason: 'non-accepted' } as any;
+    }
+
+    // Deduplicate: if an accepted submission already exists, return existing and skip insert
+    const existing = await db
+      .select()
+      .from(codeSubmissions)
+      .where(and(
+        eq(codeSubmissions.externalUserId, externalUserId),
+        eq(codeSubmissions.questionSlug, questionSlug)
+      )) as any[];
+
+    const acceptedExisting = existing?.find((s: any) => (s.submissionStatus || '').toLowerCase() === 'accepted');
+    if (acceptedExisting) {
+      return { skipped: true, reason: 'duplicate-accepted', submission: acceptedExisting } as any;
+    }
+
+    // Insert the accepted solution
+    const inserted = await db.insert(codeSubmissions).values({
       externalUserId,
       questionSlug,
       code,
       language,
       problemTitle,
-      submissionStatus,
+      submissionStatus: 'accepted',
       createdAt: new Date(),
       updatedAt: new Date(),
-    });
+    }).returning();
+    return inserted?.[0] ?? inserted;
   } catch (error) {
     console.error("Failed to save code submission in database");
     throw error;

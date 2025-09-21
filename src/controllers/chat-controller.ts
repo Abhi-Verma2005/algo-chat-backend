@@ -4,6 +4,9 @@ import { z } from 'zod';
 import { convertToCoreMessages, streamText, Message } from "ai";
 import { AuthenticatedRequest } from '../middleware/auth';
 import { geminiProModel } from '@/services/ai-service';
+import { externalDb } from '@/lib/algo-db';
+import { questions } from '@/models/algo-schema';
+import { eq } from 'drizzle-orm';
 import { 
   getUserProgress, 
   getRecentActivity, 
@@ -62,7 +65,7 @@ Tool Use Policy
 When To Use Each Tool
 - getUserProgressOverview: Compare levels, difficulty mix, or streak; decide what to focus on.
 - getFilteredQuestionsToSolve: Recommend problems given topics (SCREAMING_SNAKE_CASE). Prefer unsolved items.
-- getPlatformQuestionsOnly: When user asks for strictly platform-specific questions (e.g., "CodeChef only" or "LeetCode only"). Return ONLY slug and url.
+ - getPlatformQuestions: When user asks for platform-specific questions (e.g., "CodeChef only" or "LeetCode only"). Return full question details like filtered questions (name, difficulty, points, tags, solved/saved flags, and actions summary).
 - getUserSubmissionForProblem: Reference the user’s last attempt before giving guidance on that slug.
 - getRecentActivity: Summarize what happened lately to adjust advice.
 - getAvailableTags: Offer discoverable topics or help map user phrasing to tags.
@@ -78,8 +81,8 @@ Constraints
 - Do not reveal final solutions unless the user explicitly asks.
 - Cite the platform link when discussing a problem (LeetCode or CodeChef).
 
-Strict Platform Responses
-- If the user requests only CodeChef or only LeetCode problems, call getPlatformQuestionsOnly and respond with just a compact list of {slug, url}. No extra commentary unless asked.
+Platform Responses
+- If the user requests only CodeChef or only LeetCode problems, call getPlatformQuestions with the platform parameter and return the same shape as getFilteredQuestionsToSolve (including counts and flags). Keep responses concise.
 
 Today’s date: ${new Date().toLocaleDateString()}
 `;
@@ -166,10 +169,12 @@ Today’s date: ${new Date().toLocaleDateString()}
         getUserSubmissionForProblem: {
           description: "Get the user's latest code submission for a specific problem/question",
           parameters: z.object({
-            questionSlug: z.string().describe("The slug/identifier of the problem (e.g., 'two-sum', 'binary-search')"),
+            questionSlug: z.string().optional().describe("The slug/identifier of the problem (e.g., 'two-sum', 'binary-search')"),
+            questionUrl: z.string().optional().describe("Full URL of the problem on LeetCode or CodeChef"),
+            platform: z.enum(['LEETCODE', 'CODECHEF']).optional().describe('Optional platform hint'),
             includeMetadata: z.boolean().default(true).describe("Include submission metadata like language, timestamp, etc.")
           }),
-          execute: async ({ questionSlug, includeMetadata }) => {
+          execute: async ({ questionSlug, questionUrl, platform, includeMetadata }) => {
             // Get the authenticated user from the request
             const userId = getUser()?.userId;
             if (!userId) {
@@ -178,21 +183,54 @@ Today’s date: ${new Date().toLocaleDateString()}
             }
             
             try {
-              // Get the user's submission for this specific problem
+              // Derive target slug from slug or URL
+              let targetSlug = (questionSlug || '').trim();
+
+              // Helper: try externalDB mapping by exact URL
+              const deriveSlugFromUrl = async (url: string): Promise<string | undefined> => {
+                const u = url.trim();
+                // Try exact match in external questions table first
+                const byLc = await externalDb.select().from(questions).where(eq(questions.leetcodeUrl, u));
+                if (byLc?.[0]?.slug) return byLc[0].slug;
+                const byCc = await externalDb.select().from(questions).where(eq(questions.codechefUrl as any, u));
+                if (byCc?.[0]?.slug) return byCc[0].slug;
+                // Fallback: parse from path
+                try {
+                  const parsed = new URL(u);
+                  const parts = parsed.pathname.split('/').filter(Boolean);
+                  // For LeetCode: '/problems/<slug>/' → pick second segment if 'problems' exists
+                  const idx = parts.findIndex((p) => p.toLowerCase() === 'problems');
+                  if (idx >= 0 && parts[idx + 1]) return parts[idx + 1].toLowerCase();
+                  // For CodeChef: often '/problems/<SLUG>' or last segment
+                  if (parts.length > 0) return parts[parts.length - 1].toLowerCase();
+                } catch {}
+                return undefined;
+              };
+
+              if (!targetSlug && questionUrl) {
+                const derived = await deriveSlugFromUrl(questionUrl);
+                if (derived) targetSlug = derived;
+              }
+
+              if (!targetSlug) {
+                return { found: false, message: 'No slug or resolvable URL provided' };
+              }
+
+              // Get the user's submissions and find by slug (case-insensitive)
               const submissions = await getCodeSubmissionsByUser({ externalUserId: userId });
-              
-              const problemSubmission = submissions.find((sub: any) => sub.questionSlug === questionSlug);
+              const lcSlug = targetSlug.toLowerCase();
+              const problemSubmission = submissions.find((sub: any) => (sub.questionSlug || '').toLowerCase() === lcSlug);
               
               if (!problemSubmission) {
                 return {
                   found: false,
-                  message: `No submission found for problem: ${questionSlug}`
+                  message: `No submission found for problem: ${targetSlug}`
                 };
               }
 
               const result: any = {
                 found: true,
-                questionSlug,
+                questionSlug: targetSlug,
                 code: problemSubmission.code,
                 language: problemSubmission.language,
                 submissionStatus: problemSubmission.submissionStatus,
@@ -278,25 +316,36 @@ Today’s date: ${new Date().toLocaleDateString()}
             }
           },
         },
-        getPlatformQuestionsOnly: {
-          description: "Return ONLY {slug, url} pairs for a specific platform (LEETCODE or CODECHEF). Ideal for 'give me CodeChef questions' requests.",
+        getPlatformQuestions: {
+          description: "Return full-detail questions for a specific platform (LEETCODE or CODECHEF) with the same shape as getFilteredQuestionsToSolve (counts, flags, tags).",
           parameters: z.object({
-            platform: z.enum(['LEETCODE', 'CODECHEF']).describe('Target platform for questions'),
-            limit: z.number().min(1).max(100).default(10).describe('How many questions to fetch'),
+            platform: z.enum(['LEETCODE', 'CODECHEF', 'CODEFORCES']).describe('Target platform for questions'),
+            limit: z.number().min(1).max(100).default(50).describe('How many questions to fetch'),
             topics: z.array(z.string()).optional().describe('Optional SCREAMING_SNAKE_CASE tag filters'),
+            difficulty: z.union([
+              z.enum(['BEGINNER', 'EASY', 'MEDIUM', 'HARD', 'VERYHARD']),
+              z.array(z.enum(['BEGINNER', 'EASY', 'MEDIUM', 'HARD', 'VERYHARD']))
+            ]).optional(),
             unsolvedOnly: z.boolean().optional().describe('If true, exclude questions the user has already solved')
           }),
-          execute: async ({ platform, limit, topics, unsolvedOnly }) => {
+          execute: async ({ platform, limit, topics, difficulty, unsolvedOnly }) => {
             const userId = getUser()?.userId;
             if (!userId) {
               console.error('❌ [TOOL] No authenticated user found');
               return { error: 'User not authenticated' };
             }
             try {
-              const res = await getQuestionsByPlatform({ platform, userId, limit, topics: topics ?? [], unsolvedOnly: !!unsolvedOnly });
+              const res = await getFilteredQuestions({
+                topics: topics ?? [],
+                userId,
+                limit,
+                platform,
+                difficulty: difficulty as any,
+                unsolvedOnly: !!unsolvedOnly,
+              });
               return res;
             } catch (error) {
-              console.error('❌ [TOOL] getPlatformQuestionsOnly error:', error);
+              console.error('❌ [TOOL] getPlatformQuestions error:', error);
               return { error: 'Failed to fetch platform questions' };
             }
           }

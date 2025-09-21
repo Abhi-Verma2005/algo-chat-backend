@@ -328,13 +328,27 @@ export const getFilteredQuestions = async ({ topics, userId, limit, unsolvedOnly
 
   if (unsolvedOnly) items = items.filter((q) => !q.isSolved);
 
+  const capped = Math.min(Math.max(limit, 1), 100);
+  const sliced = items.slice(0, capped);
+
+  const solvedCount = sliced.filter((q) => q.isSolved).length;
+  const savedCount = sliced.filter((q) => q.isBookmarked).length;
+
   return {
-    questionsWithSolvedStatus: items.slice(0, Math.min(Math.max(limit, 1), 100)),
-    individualPoints: (() => {
-      // Best-effort: fetch user's points if needed (already available in many calls)
-      // We avoid an extra DB call here; points can be omitted or 0 if not present
-      return 0;
-    })(),
+    questionsWithSolvedStatus: sliced,
+    individualPoints: 0,
+    summary: {
+      total: sliced.length,
+      solvedCount,
+      savedCount,
+      label: 'Practice Questions'
+    },
+    actions: {
+      canDone: true,
+      canCheck: true,
+      canSolve: true,
+      canHint: true
+    }
   } as any;
 };
 
