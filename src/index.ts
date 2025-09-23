@@ -19,6 +19,7 @@ import net from 'net';
 import cors from 'cors';
 import { corsMiddleware } from '@/middleware/cors';
 import helmet from 'helmet';
+import morgan from 'morgan';
 import authRoutes from './routes/auth';
 import chatRoutes from './routes/chat';
 import submissionRoutes from './routes/submissions';
@@ -34,6 +35,7 @@ app.use(corsMiddleware);
 
 // Other middleware after CORS
 app.use(helmet());
+app.use(morgan('dev'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
